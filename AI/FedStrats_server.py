@@ -36,12 +36,12 @@ fedavg_strategy = fl.server.strategy.FedAvg(
     evaluate_metrics_aggregation_fn=aggregate_metrics,
 )
 
-trimmed_avg_strategy = fl.server.strategy.FedTrimmedAvg(
-    fraction_fit=1.0,
-    min_fit_clients=2,
-    beta=0.1,  # Fraction to cut off of both tails of the distribution
-    evaluate_metrics_aggregation_fn=aggregate_metrics,
-)
+# trimmed_avg_strategy = fl.server.strategy.FedTrimmedAvg(
+#     fraction_fit=1.0,
+#     min_fit_clients=2,
+#     beta=0.1,  # Fraction to cut off of both tails of the distribution
+#     evaluate_metrics_aggregation_fn=aggregate_metrics,
+# )
 
 fedprox_strategy = fl.server.strategy.FedProx(
     fraction_fit=1.0,
