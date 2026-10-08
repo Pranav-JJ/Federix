@@ -11,7 +11,7 @@ def calculate_rouge(reference, prediction):
     return scores[0]["rouge-1"]["f"], scores[0]["rouge-2"]["f"], scores[0]["rouge-l"]["f"]
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     # Load test dataset
     test_dataset = load_dataset("lighteval/legal_summarization", "BillSum")["test"]
     references = [example["summary"] for example in test_dataset]

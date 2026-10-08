@@ -110,21 +110,20 @@ def train(net, trainloader, epochs):
     print("\nTraining finished.")
 
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def main(node_id):
-    net = AutoModelForSeq2SeqLM.from_pretrained(
-        CHECKPOINT,
-    ).to("cuda")
+    net = AutoModelForSeq2SeqLM.from_pretrained(CHECKPOINT).to(DEVICE)
 
     trainloader, _ = load_data(node_id)
 
-    # Flower client
     class PlaceholderClient(fl.client.NumPyClient):
         def get_parameters(self, config):
-            return [val.cpu().numpy() for _, val in net.state_dict().items()]
+            return [val.cpu().numpy() for _, val in net.state_dict().items()]  # Move to CPU before converting to numpy
 
         def set_parameters(self, parameters):
             params_dict = zip(net.state_dict().keys(), parameters)
-            state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
+            state_dict = OrderedDict({k: torch.Tensor(v).to(DEVICE) for k, v in params_dict})  # Move to CUDA
             net.load_state_dict(state_dict, strict=True)
 
         def fit(self, parameters, config):
@@ -134,32 +133,29 @@ def main(node_id):
             print("Training Finished.")
             return self.get_parameters(config={}), len(trainloader), {}
 
-        # def evaluate(self, parameters, config):
-        #     # Add evaluation functionality here if needed
-        #     return 0.0, 0, {}
-        #     # pass
-
         def evaluate(self, parameters, config):
             self.set_parameters(parameters)
 
-            # Load test dataset
             test_dataset = load_dataset("lighteval/legal_summarization", "BillSum")["test"]
+
+            # Take 1/7 of the original size of the dataset
+            test_dataset = test_dataset.shuffle(seed=42).select(range(len(test_dataset) // 32))
+
             references = [example["summary"] for example in test_dataset]
 
-            # Instantiate tokenizer
             tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT)
 
-            # Prepare test data loader
             test_dataset = test_dataset.map(
                 lambda x: tokenizer.prepare_seq2seq_batch(x["article"], x["summary"]),
                 batched=True,
             )
             test_loader = DataLoader(test_dataset, batch_size=4, collate_fn=lambda data: collate_fn(data, tokenizer))
 
-            # Evaluate on test dataset
             net.eval()
             total_loss = 0
             total_examples = 0
+            batch_count = 0  # Counter to keep track of batches processed
+
             with torch.no_grad():
                 for batch in test_loader:
                     input_ids = batch["input_ids"].to(DEVICE)
@@ -168,8 +164,9 @@ def main(node_id):
                     loss = outputs.loss
                     total_loss += loss.item() * len(input_ids)
                     total_examples += len(input_ids)
+                    batch_count += 1  # Increment the counter
+                    print(f"\rProcessed {batch_count}/{len(test_loader)} batches", end="", flush=True)
 
-            # Calculate ROUGE scores
             generated_summaries = []
             for example in test_dataset:
                 input_ids = tokenizer(example["article"], truncation=True, padding=True, return_tensors="pt")["input_ids"]
@@ -178,12 +175,10 @@ def main(node_id):
                 generated_summaries.append(generated_summary)
 
             rouge_1, rouge_2, rouge_l = calculate_rouge(references, generated_summaries)
-
-            # Calculate average loss
             avg_loss = total_loss / total_examples
 
-            # Return evaluation results
             return avg_loss, total_examples, {"rouge-1": rouge_1, "rouge-2": rouge_2, "rouge-l": rouge_l}
+
 
     # Start client
     fl.client.start_client(

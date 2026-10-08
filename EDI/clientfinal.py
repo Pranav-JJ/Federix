@@ -1,34 +1,32 @@
 import argparse
 import warnings
 from collections import OrderedDict
-
-import flwr as fl
+from rouge import Rouge
 import torch
 from torch.optim import AdamW
-
-from transformers import AutoModelForSeq2SeqLM
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
-
 from datasets import load_dataset
+import flwr as fl
 
 warnings.filterwarnings("ignore", category=UserWarning)
 DEVICE = torch.device("cpu")
-CHECKPOINT = "t5-small"  # transformer model checkpoint
 
 
 def load_data(node_id):
     """Load dataset (training and eval)"""
     dataset = load_dataset("lighteval/legal_summarization", "BillSum")
     full_train_dataset = dataset["train"]
-    eval_dataset = dataset["test"]
+    eval_datasetx = dataset["test"]
 
-    tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT)
+    tokenizer = AutoTokenizer.from_pretrained("t5-small")
 
     # Split the full training dataset into two halves
     train_dataset_size = len(full_train_dataset)
-    train_dataset_1 = full_train_dataset.select(range(0, train_dataset_size // 30))
+    train_dataset_1 = full_train_dataset.select(range(0, train_dataset_size // 40))
     train_dataset_2 = full_train_dataset.select(range(train_dataset_size // 2, train_dataset_size))
+
+    eval_dataset = eval_datasetx.select(range(0, 100))
 
     # Choose one half as the training data
     train_dataset = train_dataset_1
@@ -46,7 +44,7 @@ def load_data(node_id):
     trainloader = DataLoader(train_dataset, batch_size=4, collate_fn=lambda data: collate_fn(data, tokenizer))
     evalloader = DataLoader(eval_dataset, batch_size=4, collate_fn=lambda data: collate_fn(data, tokenizer))
 
-    return trainloader, evalloader
+    return trainloader, evalloader, eval_dataset
 
 
 def collate_fn(data, tokenizer):
@@ -97,13 +95,31 @@ def train(net, trainloader, epochs):
         print(f"\rBatch {i}/{total_batches} - Loss: {loss.item():.4f}", end="", flush=True)
     print("\nTraining finished.")
 
+    return net.state_dict()
+
+
+def calculate_rouge(net, eval_dataset, tokenizer):
+    rouge = Rouge()
+    references = [example["summary"] for example in eval_dataset]
+
+    generated_summaries = []
+    for example in eval_dataset:
+        input_ids = tokenizer(example["article"], truncation=True, padding=True, return_tensors="pt")["input_ids"]
+        outputs = net.generate(input_ids.to("cuda"))
+        generated_summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_summaries.append(generated_summary)
+
+    scores = rouge.get_scores(generated_summaries, references)
+    rouge_1 = scores[0]["rouge-1"]["f"]
+    rouge_2 = scores[0]["rouge-2"]["f"]
+    rouge_l = scores[0]["rouge-l"]["f"]
+
+    return rouge_1, rouge_2, rouge_l
 
 def main(node_id):
-    net = AutoModelForSeq2SeqLM.from_pretrained(
-        CHECKPOINT,
-    ).to("cuda")
+    net = AutoModelForSeq2SeqLM.from_pretrained("t5-small").to("cuda")
 
-    trainloader, _ = load_data(node_id)
+    trainloader, _, eval_dataset = load_data(node_id)
 
     # Flower client
     class PlaceholderClient(fl.client.NumPyClient):
@@ -118,13 +134,18 @@ def main(node_id):
         def fit(self, parameters, config):
             self.set_parameters(parameters)
             print("Training Started...")
-            train(net, trainloader, epochs=1)
+            final_state_dict = train(net, trainloader, epochs=1)
             print("Training Finished.")
             return self.get_parameters(config={}), len(trainloader), {}
 
         def evaluate(self, parameters, config):
-            # Add evaluation functionality here if needed
-            pass
+            self.set_parameters(parameters)
+            tokenizer = AutoTokenizer.from_pretrained("t5-small")
+            rouge_1, rouge_2, rouge_l = calculate_rouge(net, eval_dataset, tokenizer)
+            print(f"ROUGE-1 Score: {rouge_1:.4f}")
+            print(f"ROUGE-2 Score: {rouge_2:.4f}")
+            print(f"ROUGE-L Score: {rouge_l:.4f}")
+            return 0.0  # Return a dummy value to indicate evaluation is complete
 
     # Start client
     fl.client.start_client(
@@ -136,7 +157,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Flower")
     parser.add_argument(
         "--node-id",
-        choices=list(range(2)),
+        choices=list(range(3)),
         required=True,
         type=int,
         help="Partition of the dataset divided into 1,000 iid partitions created "
